@@ -26,10 +26,12 @@ class NutritionService {
   }
 
   // Get foods for a dining hall
+  // Pass userId to have each food's conflicts with that user's dietary restrictions filled in
   static Future<List<FoodItem>> getFoodsForDiningHall(
     String diningHall, {
     String? mealType,
     String? date,
+    int? userId,
   }) async {
     try {
       var uri = Uri.parse('$baseUrl/dining-halls/$diningHall/foods');
@@ -37,6 +39,7 @@ class NutritionService {
       final queryParams = <String, String>{};
       if (mealType != null) queryParams['meal_type'] = mealType;
       if (date != null) queryParams['date'] = date;
+      if (userId != null) queryParams['user_id'] = userId.toString();
 
       uri = uri.replace(queryParameters: queryParams);
 
@@ -84,6 +87,7 @@ class NutritionService {
               .toList(),
           'user_target_calories': data['user_target_calories'],
           'goal': data['goal'],
+          'applied_restrictions': List<String>.from(data['applied_restrictions'] ?? []),
           'count': data['count'],
         };
       } else {

@@ -20,6 +20,7 @@ def create_nutrition_table(conn):
             meal_type TEXT NOT NULL,
             category TEXT,
             name TEXT NOT NULL,
+            traits TEXT,
             serving_size TEXT,
             calories REAL,
             total_fat REAL,
@@ -35,6 +36,13 @@ def create_nutrition_table(conn):
             scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+    # Databases created before traits were scraped need the column added
+    cursor.execute("PRAGMA table_info(nutrition_data)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if 'traits' not in columns:
+        cursor.execute("ALTER TABLE nutrition_data ADD COLUMN traits TEXT")
+        print("✓ Added 'traits' column")
 
     # Create indexes for faster queries
     cursor.execute('''
@@ -94,19 +102,30 @@ def load_excel_to_database(excel_file, db_file='../data/nutrition_data.db'):
     cursor.execute("DELETE FROM nutrition_data")
     print("✓ Cleared existing data")
 
+    # Excel files from before traits were scraped have no traits column.
+    # Their traits are unknown (NULL), which is different from a dish with no trait icons ('').
+    has_traits = 'traits' in df.columns
+    if not has_traits:
+        print("! No 'traits' column in Excel file - dietary restrictions can't be checked for this data")
+
     # Insert data
     inserted = 0
     failed = 0
 
     for idx, row in df.iterrows():
+        if has_traits:
+            traits = row['traits'] if pd.notna(row['traits']) else ''
+        else:
+            traits = None
+
         try:
             cursor.execute('''
                 INSERT INTO nutrition_data (
-                    dining_hall, service, date, meal_type, category, name,
+                    dining_hall, service, date, meal_type, category, name, traits,
                     serving_size, calories, total_fat, saturated_fat, trans_fat,
                     cholesterol, sodium, potassium, total_carbohydrate,
                     dietary_fiber, sugars, protein
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 row.get('dining_hall', ''),
                 row.get('service', ''),
@@ -114,6 +133,7 @@ def load_excel_to_database(excel_file, db_file='../data/nutrition_data.db'):
                 row.get('meal_type', ''),
                 row.get('category', ''),
                 row.get('name', ''),
+                traits,
                 row.get('serving_size', ''),
                 float(row.get('calories', 0)) if pd.notna(row.get('calories')) else 0.0,
                 float(row.get('total_fat', 0)) if pd.notna(row.get('total_fat')) else 0.0,
@@ -159,6 +179,10 @@ def load_excel_to_database(excel_file, db_file='../data/nutrition_data.db'):
     meals = cursor.fetchone()[0]
     print(f"Meal types: {meals}")
 
+    cursor.execute("SELECT COUNT(*) FROM nutrition_data WHERE traits IS NOT NULL AND traits != ''")
+    with_traits = cursor.fetchone()[0]
+    print(f"Items with allergen/diet traits: {with_traits}")
+
     # Show sample data
     print("\n" + "="*60)
     print("SAMPLE DATA (First 5 items)")
@@ -179,7 +203,7 @@ def load_excel_to_database(excel_file, db_file='../data/nutrition_data.db'):
     return True
 
 
-def query_database(db_file='nutrition_data.db'):
+def query_database(db_file='../data/nutrition_data.db'):
     """Example queries to demonstrate database usage"""
 
     if not os.path.exists(db_file):

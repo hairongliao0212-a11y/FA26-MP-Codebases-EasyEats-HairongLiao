@@ -1,0 +1,14 @@
+{
+  "_comment": "Maps each restriction in the app's Dietary Restrictions page to the eatsmart trait icons it depends on. 'exclude': a dish with any of these traits breaks the restriction. 'require_any': a dish must have at least one of these traits. Used by server.js (via dietary.js) and meal-planning/meal_planner.py.",
+  "_not_checked": ["Low Sodium", "Low Sugar", "Keto", "Paleo"],
+  "Vegetarian": { "require_any": ["Vegetarian", "Vegan"] },
+  "Vegan": { "require_any": ["Vegan"] },
+  "Gluten-Free": { "exclude": ["Gluten", "Wheat"] },
+  "Dairy-Free": { "exclude": ["Milk"] },
+  "Nut Allergy": { "exclude": ["Peanuts", "Tree Nuts"] },
+  "Shellfish Allergy": { "exclude": ["Shellfish"] },
+  "Egg Allergy": { "exclude": ["Eggs"] },
+  "Soy Allergy": { "exclude": ["Soy"] },
+  "Halal": { "require_any": ["Halal"] },
+  "Kosher": { "require_any": ["Kosher"] }
+}

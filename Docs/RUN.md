@@ -51,16 +51,42 @@ your computer's LAN IP.
 | `Backend/data/users.json` | User accounts (PBKDF2-hashed passwords) and profiles |
 | `Backend/data/meal_tracking.json` | Logged meals |
 
-The menu DB was loaded from `complete_dining_data_20251204_070010.xlsx`, a December 2025
-scrape. It covers 5 dining halls, but not every hall has every meal
-(for example, there is no Ikenberry dinner data).
+The menu DB was loaded from an October 2026 scrape with allergen/diet traits: Ikenberry for
+Oct 22–23, the other locations for Oct 23–24, and Kosher Kitchen for Oct 25–26 (it has no
+menus Friday–Saturday). It covers 11 locations and every meal period of each day.
+Menus don't repeat weekly (ISR Fusion 48 runs a 14-day cycle), so re-scrape regularly.
 
 To refresh menus:
 
 ```bash
 cd Backend/scrapers
-python nutrition_scraper.py        # Selenium; needs Google Chrome installed
+python nutrition_scraper.py        # Selenium; needs Google Chrome installed. Needs a steady
+                                   # connection: locations it can't reach are skipped, not retried
 python load_to_db.py <output>.xlsx # replaces the contents of ../data/nutrition_data.db
+```
+
+### Dietary restrictions
+
+The scraper saves the allergen and diet icons eatsmart shows beside each dish (Milk, Wheat,
+Vegan, Halal, ...) in the `traits` column. [`Backend/dietary_rules.json`](../Backend/dietary_rules.json)
+maps each restriction a user can pick to those traits; both `server.js` (via `dietary.js`) and
+`meal_planner.py` read it.
+
+- `/api/recommendations/:userId` and `/api/meal-plan?user_id=` only return dishes that fit
+  every one of the user's restrictions.
+- `/api/dining-halls/:hall/foods?user_id=` returns every dish, each with a `conflicts` list.
+- A dish with `traits` NULL (data scraped before traits existed) can't be verified, so it is
+  excluded whenever the user has a restriction.
+- Low Sodium, Low Sugar, Keto and Paleo have no eatsmart labels, so they are listed under
+  `_not_checked` and ignored.
+
+## Tests
+
+```bash
+# From the repository root, with the venv active
+python -m unittest discover -s Backend/tests -v   # scraper parsing, loader, meal planner
+cd Backend && npm test                            # API (starts its own server on port 3999)
+cd Frontend/flutter_easyeats && flutter test test/food_item_test.dart
 ```
 
 ## Code map
@@ -69,6 +95,8 @@ python load_to_db.py <output>.xlsx # replaces the contents of ../data/nutrition_
 Backend/
   server.js               Express API (routes listed in Docs/API_HANDBOOK.md)
   auth.js                 file-based user store + password hashing
+  dietary.js              dietary restriction checks (rules in dietary_rules.json)
+  tests/                  Python + Node tests
   meal-planning/          Python meal planner called by /api/meal-plan
   scrapers/               dining-site scraper + Excel -> SQLite loader
 Frontend/flutter_easyeats/lib/

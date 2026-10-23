@@ -3,14 +3,15 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
 const auth = require('./auth');
+const dietary = require('./dietary');
 const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Database connection
-const dbPath = path.join(__dirname, 'data', 'nutrition_data.db');
+// Database connection (NUTRITION_DB lets tests point at a small test database)
+const dbPath = process.env.NUTRITION_DB || path.join(__dirname, 'data', 'nutrition_data.db');
 const db = new sqlite3.Database(dbPath);
 
 // Middleware
@@ -47,6 +48,28 @@ app.get('/api/meal-plan', (req, res) => {
         args.push('--goal', req.query.goal);
     }
 
+    // Use the same database as the rest of the API
+    args.push('--db', dbPath);
+
+    // Pass user_id to plan around that user's dietary restrictions
+    if (!req.query.user_id) {
+        return runMealPlanner(args, res);
+    }
+
+    auth.getUserProfile(parseInt(req.query.user_id), (err, user) => {
+        if (err) {
+            return res.status(404).json(err);
+        }
+        const restrictions = dietary.supportedRestrictions(user.dietary_restrictions);
+        if (restrictions.length > 0) {
+            args.push('--restrictions', restrictions.join(','));
+        }
+        runMealPlanner(args, res);
+    });
+});
+
+// Run meal_planner.py with the given arguments and send its JSON output as the response
+function runMealPlanner(args, res) {
     // Spawn Python process
     // Note: Using 'python3' - make sure it's in the path
     const pythonProcess = spawn('python3', args);
@@ -102,7 +125,7 @@ app.get('/api/meal-plan', (req, res) => {
             }
         }
     });
-});
+}
 
 // Authentication endpoints
 app.post('/api/auth/register', (req, res) => {
@@ -232,14 +255,25 @@ app.get('/api/dining-halls', (req, res) => {
     });
 });
 
+// Attach traits as a list and, when restrictions are given, the ones each food breaks
+function withDietaryInfo(food, restrictions) {
+    const traits = dietary.parseTraits(food.traits);
+    return {
+        ...food,
+        traits,
+        conflicts: dietary.getConflicts(traits, restrictions)
+    };
+}
+
 // Get foods for a specific dining hall and meal type
+// Pass user_id to have each food marked with the user's restrictions it conflicts with
 app.get('/api/dining-halls/:hall/foods', (req, res) => {
     const { hall } = req.params;
-    const { meal_type, date } = req.query;
+    const { meal_type, date, user_id } = req.query;
 
     let query = `
         SELECT DISTINCT name, category, serving_size, calories, protein,
-               total_fat, total_carbohydrate, dietary_fiber, sugars, sodium
+               total_fat, total_carbohydrate, dietary_fiber, sugars, sodium, traits
         FROM nutrition_data
         WHERE dining_hall LIKE ?
     `;
@@ -261,7 +295,22 @@ app.get('/api/dining-halls/:hall/foods', (req, res) => {
         if (err) {
             return res.status(500).json({ error: 'Database error', details: err.message });
         }
-        res.json({ foods: rows, count: rows.length });
+
+        const respond = (restrictions) => {
+            const foods = rows.map(row => withDietaryInfo(row, restrictions));
+            res.json({ foods, count: foods.length, applied_restrictions: restrictions });
+        };
+
+        if (!user_id) {
+            return respond([]);
+        }
+
+        auth.getUserProfile(parseInt(user_id), (err, user) => {
+            if (err) {
+                return res.status(404).json(err);
+            }
+            respond(dietary.supportedRestrictions(user.dietary_restrictions));
+        });
     });
 });
 
@@ -281,11 +330,12 @@ app.get('/api/recommendations/:userId', (req, res) => {
         }
 
         const targetCaloriesPerMeal = Math.floor((user.calories || 2000) / 3);
+        const restrictions = dietary.supportedRestrictions(user.dietary_restrictions);
 
         // Get foods from the dining hall
         let query = `
             SELECT DISTINCT name, category, serving_size, calories, protein,
-                   total_fat, total_carbohydrate, dietary_fiber, sugars, sodium,
+                   total_fat, total_carbohydrate, dietary_fiber, sugars, sodium, traits,
                    (protein * 4.0 / NULLIF(calories, 0)) as protein_ratio,
                    (total_fat * 9.0 / NULLIF(calories, 0)) as fat_ratio
             FROM nutrition_data
@@ -300,24 +350,31 @@ app.get('/api/recommendations/:userId', (req, res) => {
         }
 
         // Score foods based on nutrition
+        // The top 20 are taken after dietary filtering, so no LIMIT here
         query += `
             GROUP BY name
             ORDER BY
                 (protein * 4.0 / NULLIF(calories, 0)) DESC,
                 (total_fat * 9.0 / NULLIF(calories, 0)) ASC,
                 dietary_fiber DESC
-            LIMIT 20
         `;
 
-        db.all(query, params, (err, foods) => {
+        db.all(query, params, (err, rows) => {
             if (err) {
                 return res.status(500).json({ error: 'Database error', details: err.message });
             }
+
+            // Only recommend foods that satisfy every one of the user's restrictions
+            const foods = rows
+                .map(row => withDietaryInfo(row, restrictions))
+                .filter(food => food.conflicts.length === 0)
+                .slice(0, 20);
 
             res.json({
                 recommendations: foods,
                 user_target_calories: targetCaloriesPerMeal,
                 goal: user.goal,
+                applied_restrictions: restrictions,
                 count: foods.length
             });
         });
