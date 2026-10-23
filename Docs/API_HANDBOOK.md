@@ -44,6 +44,7 @@ Generates an optimized meal plan based on nutritional goals and location.
   - `calories` (Required): Target calorie count (integer). Example: `600`.
   - `dining_hall` (Required): Name of the dining hall. Example: `ISR`, `Ikenberry`.
   - `meal_type` (Optional): `Breakfast`, `Lunch`, or `Dinner`. If omitted, it defaults based on the current time.
+  - `user_id` (Optional): Plan only with dishes that fit this user's dietary restrictions. The response's `applied_restrictions` lists the ones that were checked, and each item has a `traits` list (e.g. `["Milk", "Vegetarian"]`). See [Dietary restrictions](RUN.md#dietary-restrictions).
 
 - **Example Request**:
   ```

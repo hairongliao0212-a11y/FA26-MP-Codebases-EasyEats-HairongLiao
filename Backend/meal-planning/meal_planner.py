@@ -2,12 +2,58 @@
 Meal Planning Algorithm
 Generates optimized meal plans based on calorie targets and nutritional goals
 """
+import json
+import os
 import sqlite3
 import pandas as pd
 import random
 import numpy as np
 from datetime import datetime
 from collections import defaultdict
+
+
+# Shared with server.js (via dietary.js) so both apply the same rules
+RULES_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'dietary_rules.json')
+
+
+def load_dietary_rules(rules_file=RULES_FILE):
+    """Load the restriction -> trait rules (keys starting with '_' are notes, not restrictions)"""
+    with open(rules_file) as f:
+        rules = json.load(f)
+    return {name: rule for name, rule in rules.items() if not name.startswith('_')}
+
+
+def parse_traits(traits_value):
+    """Convert the traits column into a list.
+
+    None/NaN means the traits are unknown (scraped before traits were collected),
+    an empty string means the site shows no trait icons for the dish.
+    """
+    if traits_value is None or (isinstance(traits_value, float) and pd.isna(traits_value)):
+        return None
+    return [t.strip() for t in str(traits_value).split(',') if t.strip()]
+
+
+def get_conflicts(traits, restrictions, rules):
+    """Return the restrictions a dish does not satisfy.
+
+    A dish with unknown traits can't be verified, so it conflicts with every restriction.
+    """
+    if not restrictions:
+        return []
+    if traits is None:
+        return list(restrictions)
+
+    conflicts = []
+    for restriction in restrictions:
+        rule = rules.get(restriction)
+        if not rule:
+            continue
+        if any(t in traits for t in rule.get('exclude', [])):
+            conflicts.append(restriction)
+        elif 'require_any' in rule and not any(t in traits for t in rule['require_any']):
+            conflicts.append(restriction)
+    return conflicts
 
 
 class MealPlanner:
@@ -57,10 +103,14 @@ class MealPlanner:
                 return "Breakfast"
             return "Lunch"
 
-    def filter_available_items(self, dining_hall, meal_type, date=None):
+    def filter_available_items(self, dining_hall, meal_type, date=None, restrictions=None):
         """Filter items available for specific dining hall and meal"""
         if self.data is None:
             self.load_data()
+
+        # Older databases have no traits column; treat every dish as unknown
+        if 'traits' not in self.data.columns:
+            self.data['traits'] = None
 
         # Filter by dining hall (partial match)
         filtered = self.data[self.data['dining_hall'].str.contains(dining_hall, case=False, na=False)]
@@ -79,6 +129,14 @@ class MealPlanner:
             (filtered['protein'].notna()) &
             (filtered['total_fat'].notna())
         ]
+
+        # Keep only dishes that satisfy every dietary restriction
+        if restrictions:
+            rules = load_dietary_rules()
+            fits = filtered['traits'].apply(
+                lambda t: not get_conflicts(parse_traits(t), restrictions, rules)
+            )
+            filtered = filtered[fits]
 
         return filtered.copy()
 
@@ -183,8 +241,8 @@ class MealPlanner:
         # Ensure we get a vegetable
         if not categories['vegetables'].empty:
             veg = categories['vegetables'].sample(n=1).iloc[0]
-            # Avoid duplicates
-            if veg['name'] != selected_items[0]['name']:
+            # Avoid duplicates (there may be no protein item to compare against)
+            if not any(s['name'] == veg['name'] for s in selected_items):
                 selected_items.append(veg)
                 current_cals += veg['calories']
                 
@@ -345,19 +403,24 @@ class MealPlanner:
         
         return (cal_score * 0.4) + (macro_score * 0.5) + (div_score * 0.1)
 
-    def create_meal_plan(self, target_calories, dining_hall, meal_type=None, goal='balanced'):
+    def create_meal_plan(self, target_calories, dining_hall, meal_type=None, goal='balanced', restrictions=None):
         """
         Create an optimized meal plan using Randomized Search
         """
         if meal_type is None:
             meal_type = self.get_current_meal_type()
-            
+
         goal_config = self.GOALS.get(goal, self.GOALS['balanced'])
-        
+        # Only restrictions the dining labels can check (e.g. not Keto)
+        rules = load_dietary_rules()
+        restrictions = [r for r in (restrictions or []) if r in rules]
+
         # Get available items
-        available_items = self.filter_available_items(dining_hall, meal_type)
-        
+        available_items = self.filter_available_items(dining_hall, meal_type, restrictions=restrictions)
+
         if len(available_items) == 0:
+            if restrictions:
+                return {'error': f'No items found for {dining_hall} - {meal_type} that fit: {", ".join(restrictions)}'}
             return {'error': f'No items found for {dining_hall} - {meal_type}'}
 
         # Categorize
@@ -405,12 +468,14 @@ class MealPlanner:
         for item in best_meal:
             final_items_clean.append({
                 'name': item['name'],
-                'category': item['category'],
+                # A missing category is NaN, which json.dumps writes as invalid JSON
+                'category': item['category'] if pd.notna(item['category']) else None,
                 'servings': item['servings'],
                 'calories': item['calories'],
                 'protein': item['protein'],
                 'fat': item['total_fat'],
                 'carbs': item['total_carbohydrate'],
+                'traits': parse_traits(item.get('traits')),
                 'score': 0 # Legacy field
             })
 
@@ -419,6 +484,7 @@ class MealPlanner:
             'meal_type': meal_type,
             'target_calories': target_calories,
             'goal': goal_config['desc'],
+            'applied_restrictions': restrictions,
             'actual_calories': round(total_calories, 1),
             'items': final_items_clean,
             'totals': {
@@ -454,15 +520,19 @@ if __name__ == "__main__":
     parser.add_argument('--goal', type=str, default='balanced', choices=['balanced', 'weight_loss', 'bulking', 'keto'])
     parser.add_argument('--db', type=str, default=default_db)
     parser.add_argument('--json', action='store_true')
-    
+    parser.add_argument('--restrictions', type=str, default='',
+                        help='Comma-separated dietary restrictions, e.g. "Vegan,Nut Allergy"')
+
     args = parser.parse_args()
+    restrictions = [r.strip() for r in args.restrictions.split(',') if r.strip()]
 
     planner = MealPlanner(db_file=args.db)
     meal_plan = planner.create_meal_plan(
         target_calories=args.calories,
         dining_hall=args.hall,
         meal_type=args.meal,
-        goal=args.goal
+        goal=args.goal,
+        restrictions=restrictions
     )
 
     if args.json:

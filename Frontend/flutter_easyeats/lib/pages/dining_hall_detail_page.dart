@@ -25,6 +25,8 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
   int? _userId;
   int _targetCalories = 2000;
   String _userGoal = '';
+  // Dietary restrictions the server applied to the recommendations
+  List<String> _appliedRestrictions = [];
   String _error = '';
   String _searchQuery = '';
 
@@ -83,6 +85,7 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
 
       setState(() {
         _recommendations = result['recommendations'];
+        _appliedRestrictions = result['applied_restrictions'];
         if (_recommendations.isEmpty) {
           _error = '';
         }
@@ -100,6 +103,7 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
       final foods = await NutritionService.getFoodsForDiningHall(
         widget.diningHallName,
         mealType: _selectedMealType,
+        userId: _userId,
       );
 
       setState(() {
@@ -321,6 +325,31 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
               ),
             ),
 
+          // Dietary restrictions banner
+          if (_appliedRestrictions.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.green.shade200),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.eco, color: Colors.green.shade700, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Recommendations fit: ${_appliedRestrictions.join(', ')}. '
+                      'Based on University dining labels - confirm allergens with dining staff.',
+                      style: TextStyle(fontSize: 12, color: Colors.green.shade900),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
           // Error message
           if (_error.isNotEmpty)
             Container(
@@ -348,7 +377,9 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
                               Icon(Icons.restaurant_menu_outlined, size: 80, color: Colors.grey[300]),
                               const SizedBox(height: 24),
                               Text(
-                                'Oops! It seems like there are no meals being served at this dining hall currently.',
+                                _showRecommendations && _appliedRestrictions.isNotEmpty && _searchQuery.isEmpty
+                                    ? 'No dishes here fit your dietary restrictions (${_appliedRestrictions.join(', ')}) for $_selectedMealType.'
+                                    : 'Oops! It seems like there are no meals being served at this dining hall currently.',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
                                   fontSize: 16,
@@ -360,7 +391,9 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
                               Text(
                                 _searchQuery.isNotEmpty
                                     ? 'Try adjusting your search or check back later.'
-                                    : 'Try selecting a different dining hall or check back later.',
+                                    : _showRecommendations && _appliedRestrictions.isNotEmpty
+                                        ? 'Try another meal or dining hall, or see All Foods for what conflicts.'
+                                        : 'Try selecting a different dining hall or check back later.',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
                                   fontSize: 14,
@@ -446,6 +479,7 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
                                               ),
                                             ],
                                           ),
+                                          ..._buildDietaryInfo(food),
                                         ],
                                       ),
                                     ),
@@ -520,6 +554,54 @@ class _DiningHallDetailPageState extends State<DiningHallDetailPage> {
             )
           : null,
     );
+  }
+
+  // Diet labels, allergens and any conflicts with the user's restrictions
+  List<Widget> _buildDietaryInfo(FoodItem food) {
+    final widgets = <Widget>[];
+
+    if (food.conflicts.isNotEmpty) {
+      widgets.add(const SizedBox(height: 8));
+      widgets.add(Row(
+        children: [
+          Icon(Icons.warning_amber_rounded, size: 16, color: Colors.orange.shade800),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Text(
+              food.traits == null
+                  ? 'Allergen info unavailable - can\'t confirm: ${food.conflicts.join(', ')}'
+                  : 'Doesn\'t fit: ${food.conflicts.join(', ')}',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                color: Colors.orange.shade800,
+              ),
+            ),
+          ),
+        ],
+      ));
+    }
+
+    if (food.dietLabels.isNotEmpty) {
+      widgets.add(const SizedBox(height: 8));
+      widgets.add(Wrap(
+        spacing: 6,
+        runSpacing: 4,
+        children: food.dietLabels
+            .map((label) => _buildNutrientChip(label, Colors.teal))
+            .toList(),
+      ));
+    }
+
+    if (food.containsLabels.isNotEmpty) {
+      widgets.add(const SizedBox(height: 6));
+      widgets.add(Text(
+        'Contains: ${food.containsLabels.join(', ')}',
+        style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+      ));
+    }
+
+    return widgets;
   }
 
   Widget _buildNutrientChip(String label, Color color) {

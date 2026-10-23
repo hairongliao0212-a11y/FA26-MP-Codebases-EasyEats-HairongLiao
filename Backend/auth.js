@@ -2,12 +2,12 @@ const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
 
-// Database file path (JSON file)
-const DB_FILE = path.join(__dirname, 'data', 'users.json');
+// Database file path (JSON file); USERS_DB lets tests use their own copy
+const DB_FILE = process.env.USERS_DB || path.join(__dirname, 'data', 'users.json');
 
 // Initialize database file if it doesn't exist
 function initializeDatabase() {
-    const dataDir = path.join(__dirname, 'data');
+    const dataDir = path.dirname(DB_FILE);
 
     // Create data directory if it doesn't exist
     if (!fs.existsSync(dataDir)) {

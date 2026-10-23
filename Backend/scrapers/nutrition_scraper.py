@@ -10,6 +10,21 @@ from datetime import datetime, timedelta
 import json
 import re
 
+
+def extract_traits_from_html(item_html):
+    """Return the trait icon titles (allergens and diets, e.g. 'Milk', 'Vegan') in a menu item's HTML.
+
+    On eatsmart each trait is an <img title="..."> next to the food name.
+    """
+    soup = BeautifulSoup(item_html or '', 'html.parser')
+    traits = []
+    for img in soup.find_all('img'):
+        title = (img.get('title') or '').strip()
+        if title and title not in traits:
+            traits.append(title)
+    return traits
+
+
 class NutritionScraperComplete:
     def __init__(self, testing_mode=False):
         """Initialize the scraper with Chrome options
@@ -23,12 +38,38 @@ class NutritionScraperComplete:
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-        
-        self.driver = webdriver.Chrome(options=options)
-        self.wait = WebDriverWait(self.driver, 15)
+        # Force English so menu dates are stored as e.g. "Thursday, October 22, 2026"
+        # rather than in the computer's language
+        options.add_argument('--lang=en-US')
+        options.add_experimental_option('prefs', {'intl.accept_languages': 'en-US,en'})
+
+        self.options = options
+        self.start_browser()
         self.base_url = "https://eatsmart.housing.illinois.edu"
         self.testing_mode = testing_mode
         self.max_items_per_meal = 5 if testing_mode else None
+
+    def start_browser(self):
+        """Start (or restart) headless Chrome"""
+        self.driver = webdriver.Chrome(options=self.options)
+        self.wait = WebDriverWait(self.driver, 15)
+
+    def browser_alive(self):
+        """Check whether the browser session still responds"""
+        try:
+            self.driver.current_url
+            return True
+        except Exception:
+            return False
+
+    def restart_browser(self):
+        """Replace a crashed browser so scraping can continue with the next service"""
+        print("Browser session lost - restarting Chrome...")
+        try:
+            self.driver.quit()
+        except Exception:
+            pass
+        self.start_browser()
 
     def scrape_dining_structure(self):
         """Scrape all dining halls and their services from the dropdown menu"""
@@ -44,7 +85,17 @@ class NutritionScraperComplete:
             
             dining_halls = []
             current_hall = None
-            
+
+            def add_hall(hall):
+                # Stand-alone locations (e.g. Kosher Kitchen) have no services under them;
+                # their menus are on the location itself, so scrape it as its own service
+                if not hall['dining_services']:
+                    hall['dining_services'].append({
+                        'service_name': hall['dining_hall'],
+                        'service_id': hall['unit_id']
+                    })
+                dining_halls.append(hall)
+
             for item in dropdown_items:
                 try:
                     link = item.find_element(By.TAG_NAME, "a")
@@ -57,8 +108,8 @@ class NutritionScraperComplete:
                     is_primary = 'text-primary' in link.get_attribute('class')
                     
                     if is_primary:
-                        if current_hall and current_hall['dining_services']:
-                            dining_halls.append(current_hall)
+                        if current_hall:
+                            add_hall(current_hall)
                         
                         current_hall = {
                             'dining_hall': name,
@@ -76,16 +127,16 @@ class NutritionScraperComplete:
                 except Exception as e:
                     continue
             
-            if current_hall and current_hall['dining_services']:
-                dining_halls.append(current_hall)
-            
+            if current_hall:
+                add_hall(current_hall)
+
             return dining_halls
             
         except Exception as e:
             print(f"Error scraping dining structure: {str(e)}")
             return []
     
-    def navigate_to_service(self, unit_id, service_name):
+    def navigate_to_service(self, unit_id, service_name, retry=True):
         """Navigate to a specific dining service"""
         try:
             print(f"\nNavigating to {service_name} (ID: {unit_id})...")
@@ -104,9 +155,13 @@ class NutritionScraperComplete:
             
             print("Service loaded")
             return True
-            
+
         except Exception as e:
             print(f"Error: {str(e)}")
+            # Headless Chrome occasionally crashes on long runs; start a new one and try once more
+            if retry and not self.browser_alive():
+                self.restart_browser()
+                return self.navigate_to_service(unit_id, service_name, retry=False)
             return False
 
     def get_available_dates_for_next_n_days(self, n_days=7):
@@ -394,7 +449,14 @@ class NutritionScraperComplete:
                     except:
                         pass
 
-                    print(f"  {i}. {food_name} [{category}]")
+                    # Extract allergen and diet traits from the icons beside the name
+                    traits = []
+                    try:
+                        traits = extract_traits_from_html(item.get_attribute('innerHTML'))
+                    except:
+                        pass
+
+                    print(f"  {i}. {food_name} [{category}] {traits}")
 
                     if not food_name:
                         continue
@@ -418,6 +480,7 @@ class NutritionScraperComplete:
                     # Extract nutrition info
                     nutrition_info = self.extract_nutrition_from_modal(food_name)
                     nutrition_info['category'] = category  # Add category to the nutrition info
+                    nutrition_info['traits'] = traits
                     items_data.append(nutrition_info)
 
                     if nutrition_info.get('nutrition'):
@@ -734,7 +797,21 @@ class NutritionScraperComplete:
                         print(f"\n[Meal {meal_idx + 1}/{len(structured_meals)}]")
                         print(f"Date: {meal_info['date']}, Meal: {meal_info['meal_type']}")
 
-                        if not self.click_meal(meal_info['element']):
+                        # After the first meal the page was reloaded, so the saved element is stale;
+                        # look the meal up again on the fresh page
+                        meal_element = meal_info['element']
+                        if meal_idx > 0:
+                            fresh_meals = self.get_all_meals_structured()
+                            meal_element = next(
+                                (m['element'] for m in fresh_meals
+                                 if m['date'] == meal_info['date'] and m['meal_type'] == meal_info['meal_type']),
+                                None
+                            )
+                            if not meal_element:
+                                print(f"Could not find {meal_info['meal_type']} after reloading")
+                                continue
+
+                        if not self.click_meal(meal_element):
                             continue
 
                         # Extract nutrition info
@@ -752,6 +829,7 @@ class NutritionScraperComplete:
                                 'meal_type': meal_info['meal_type'],
                                 'category': category,  # Category column shows what type of food
                                 'name': item_data['name'],
+                                'traits': ', '.join(item_data.get('traits', [])),  # e.g. "Eggs, Milk, Vegetarian"
                                 'serving_size': item_data.get('serving_size'),
                                 'calories': self.parse_nutrition_value(item_data.get('nutrition', {}).get('calories', '0')),
                                 'total_fat': self.parse_nutrition_value(item_data.get('nutrition', {}).get('total_fat', '0')),
@@ -824,7 +902,7 @@ class NutritionScraperComplete:
 
             # Reorder columns to include date and meal_type
             column_order = [
-                'dining_hall', 'service', 'date', 'meal_type', 'category', 'name', 'serving_size',
+                'dining_hall', 'service', 'date', 'meal_type', 'category', 'name', 'traits', 'serving_size',
                 'calories', 'total_fat', 'saturated_fat', 'trans_fat', 'cholesterol',
                 'sodium', 'potassium', 'total_carbohydrate', 'dietary_fiber', 'sugars', 'protein'
             ]
